@@ -3,3 +3,6 @@ __pycache__/
 .streamlit/secrets.toml
 backups/
 storage/os/
+node_modules/
+dist/
+.vercel/
