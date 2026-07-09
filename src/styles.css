@@ -49,6 +49,31 @@ nav button.active { background: #dbeafe; color: #1e3a8a; }
 .panel { display: grid; gap: 16px; padding: 22px; }
 .inline-form { display: grid; grid-template-columns: 220px 1fr auto; align-items: end; gap: 12px; padding: 16px; margin-bottom: 18px; }
 .form-grid { display: grid; grid-template-columns: repeat(3, minmax(190px, 1fr)); gap: 14px; }
+.question-list { display: grid; gap: 14px; }
+.question-list h3, .question-section h3, .question-section h4 { margin: 0; }
+.question-section { display: grid; gap: 12px; padding: 16px; border: 1px solid #d6e0ea; border-radius: 12px; background: #f8fafc; }
+.question-section h4 { color: #475467; }
+.question-row { margin: 0; padding: 14px; border: 1px solid #d6e0ea; border-radius: 12px; background: #fff; }
+.question-row legend { padding: 0 6px; font-weight: 800; font-size: 13px; color: #101828; }
+.choice-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.choice-pill { display: inline-flex; grid-template-columns: auto; align-items: center; gap: 7px; padding: 8px 10px; border: 1px solid #b9cdfd; border-radius: 999px; background: #f8fbff; font-size: 13px; }
+.choice-pill input { width: auto; }
+.course-summary { padding: 10px 12px; border: 1px solid #d6e0ea; border-radius: 12px; background: #f8fafc; color: #475467; font-weight: 700; }
+.filters-bar { display: grid; grid-template-columns: minmax(180px, 260px) minmax(220px, 1fr); gap: 12px; margin-bottom: 18px; padding: 16px; border: 1px solid #d6e0ea; border-radius: 14px; background: rgba(255,255,255,.92); }
+.detail-panel { display: grid; gap: 18px; margin-top: 20px; }
+.detail-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 18px; border: 1px solid #d6e0ea; border-radius: 14px; background: rgba(255,255,255,.94); }
+.detail-header h3, .detail-header p { margin: 0; }
+.detail-header p, .muted { color: #667085; font-weight: 700; }
+.download-button { display: inline-flex; align-items: center; justify-content: center; padding: 10px 14px; border: 1px solid #b9cdfd; border-radius: 12px; background: linear-gradient(#fff, #eef5ff); color: #0f172a; font-weight: 800; text-decoration: none; }
+.detail-grid { display: grid; grid-template-columns: repeat(4, minmax(140px, 1fr)); gap: 12px; }
+.approval-actions { display: grid; gap: 14px; padding: 18px; border: 1px solid #d6e0ea; border-radius: 14px; background: rgba(255,255,255,.94); }
+.response-section { border: 1px solid #d6e0ea; border-radius: 14px; background: rgba(255,255,255,.94); overflow: hidden; }
+.response-section summary { display: flex; justify-content: space-between; align-items: center; padding: 14px 16px; cursor: pointer; font-weight: 900; }
+.response-section summary span { color: #667085; font-size: 12px; }
+.response-section .table-scroll { border: 0; border-top: 1px solid #d6e0ea; border-radius: 0; box-shadow: none; }
+.action-row { display: flex; justify-content: flex-end; gap: 12px; }
+.action-row button { width: 180px; }
+button.danger { border-color: #fecaca; background: #fee2e2; color: #991b1b; }
 .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; }
 .tabs button { border-radius: 999px; }
 .tabs button.active { background: #dbeafe; color: #1e3a8a; }
@@ -61,11 +86,16 @@ td input { min-width: 160px; padding: 8px; border-radius: 8px; }
 .alert, .empty { margin: 12px 0; padding: 12px 14px; border-radius: 12px; font-weight: 700; }
 .success { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
 .error { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; }
+.warning { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
 .empty { background: #fff; border: 1px solid #d6e0ea; color: #667085; }
+.plain-button { border: 0; background: transparent; box-shadow: none; color: #1e3a8a; }
 
 @media (max-width: 960px) {
   .app-shell { grid-template-columns: 1fr; }
   .sidebar { position: relative; height: auto; }
   .content { padding: 24px; }
-  .cards-grid, .form-grid, .inline-form { grid-template-columns: 1fr; }
+  .cards-grid, .form-grid, .inline-form, .filters-bar, .detail-grid { grid-template-columns: 1fr; }
+  .action-row { flex-direction: column; }
+  .action-row button { width: 100%; }
+  .detail-header { align-items: stretch; flex-direction: column; }
 }

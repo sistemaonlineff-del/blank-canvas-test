@@ -5,6 +5,9 @@ export type User = {
   email?: string;
   perfil: string;
   ativo?: boolean | number;
+  senha_temporaria?: boolean | number;
+  trocar_senha_obrigatorio?: boolean | number;
+  acesso_pendente?: boolean | number;
 };
 
 export type Row = Record<string, any>;
@@ -29,6 +32,16 @@ export const api = {
     request<{ user: User }>("/api/login", {
       method: "POST",
       body: JSON.stringify({ usuario, senha })
+    }),
+  register: (email: string) =>
+    request<{ message: string }>("/api/register", {
+      method: "POST",
+      body: JSON.stringify({ email })
+    }),
+  changePassword: (userId: number, senha: string) =>
+    request<{ user: User; message: string }>("/api/change-password", {
+      method: "POST",
+      body: JSON.stringify({ user_id: userId, senha })
     }),
   dashboard: () => request<any>("/api/dashboard"),
   entities: () => request<{ items: Row[] }>("/api/entities"),
@@ -56,14 +69,20 @@ export const api = {
       body: JSON.stringify({ entidade_id, respostas })
     }),
   courses: () => request<{ items: Row[] }>("/api/courses"),
+  courseQuestions: (courseId: number) => request<{ items: Row[] }>(`/api/courses/${courseId}/questions`),
   protocols: () => request<{ items: Row[]; status: string[] }>("/api/protocols"),
   createProtocol: (payload: Row) =>
     request<any>("/api/protocols", {
       method: "POST",
       body: JSON.stringify(payload)
     }),
-  advanceProtocol: (protocolo: string, usuario: string, observacao = "") =>
+  advanceProtocol: (protocolo: string, usuario: string, observacao = "", data_agendada = "") =>
     request<any>(`/api/protocols/${protocolo}/advance`, {
+      method: "POST",
+      body: JSON.stringify({ usuario, observacao, data_agendada })
+    }),
+  cancelProtocol: (protocolo: string, usuario: string, observacao = "") =>
+    request<any>(`/api/protocols/${protocolo}/cancel`, {
       method: "POST",
       body: JSON.stringify({ usuario, observacao })
     }),

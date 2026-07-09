@@ -1,20 +1,28 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import os
 import re
+import secrets
+import smtplib
 import sqlite3
+import unicodedata
+import zipfile
 from contextlib import contextmanager
 from datetime import datetime
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 
 
 APP_DIR = Path(__file__).resolve().parents[1]
 DB_PATH = APP_DIR / "bahia.db"
+STORAGE_DIR = APP_DIR / "storage"
+OS_UPLOAD_DIR = STORAGE_DIR / "os"
 DATABASE_URL = os.getenv("SUPABASE_DB_URL") or os.getenv("DATABASE_URL")
 USE_POSTGRES = bool(DATABASE_URL)
 
@@ -50,8 +58,80 @@ def hash_pw(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
+def temporary_password(size: int = 10) -> str:
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+    return "".join(secrets.choice(alphabet) for _ in range(size))
+
+
 def now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def slug(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]+", "_", value).strip("_") or "arquivo"
+
+
+def docx_escape(value: Any) -> str:
+    text = "" if value is None else str(value)
+    return html.escape(text or "-", quote=False)
+
+
+def docx_paragraph(text: Any, *, bold: bool = False, size: int = 22, align: str = "left", shade: str = "") -> str:
+    bold_xml = "<w:b/>" if bold else ""
+    jc_xml = f"<w:jc w:val=\"{align}\"/>" if align else ""
+    shade_xml = f"<w:shd w:fill=\"{shade}\"/>" if shade else ""
+    return (
+        f"<w:p><w:pPr>{jc_xml}{shade_xml}<w:spacing w:after=\"120\"/></w:pPr><w:r><w:rPr>"
+        f"{bold_xml}<w:sz w:val=\"{size}\"/></w:rPr><w:t>{docx_escape(text)}</w:t></w:r></w:p>"
+    )
+
+
+def docx_table(rows: list[list[Any]]) -> str:
+    table_rows = []
+    for row in rows:
+        cells = []
+        for cell_idx, cell in enumerate(row):
+            fill = "EAF2FF" if cell_idx == 0 else "FFFFFF"
+            cells.append(
+                "<w:tc><w:tcPr><w:tcW w:w=\"5000\" w:type=\"dxa\"/>"
+                f"<w:shd w:fill=\"{fill}\"/><w:tcMar><w:top w:w=\"90\" w:type=\"dxa\"/><w:left w:w=\"120\" w:type=\"dxa\"/><w:bottom w:w=\"90\" w:type=\"dxa\"/><w:right w:w=\"120\" w:type=\"dxa\"/></w:tcMar>"
+                f"</w:tcPr>{docx_paragraph(cell, bold=cell_idx == 0, size=21)}</w:tc>"
+            )
+        table_rows.append(f"<w:tr>{''.join(cells)}</w:tr>")
+    return (
+        "<w:tbl><w:tblPr><w:tblW w:w=\"0\" w:type=\"auto\"/>"
+        "<w:tblBorders><w:top w:val=\"single\" w:sz=\"4\" w:color=\"BFBFBF\"/>"
+        "<w:left w:val=\"single\" w:sz=\"4\" w:color=\"BFBFBF\"/><w:bottom w:val=\"single\" w:sz=\"4\" w:color=\"BFBFBF\"/>"
+        "<w:right w:val=\"single\" w:sz=\"4\" w:color=\"BFBFBF\"/><w:insideH w:val=\"single\" w:sz=\"4\" w:color=\"BFBFBF\"/>"
+        "<w:insideV w:val=\"single\" w:sz=\"4\" w:color=\"BFBFBF\"/></w:tblBorders></w:tblPr>"
+        f"{''.join(table_rows)}</w:tbl>"
+    )
+
+
+def docx_section(title: str) -> str:
+    return docx_paragraph(title, bold=True, size=24, shade="D9EAF7")
+
+
+def write_simple_docx(path: Path, body_xml: str):
+    content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>"""
+    rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"""
+    document = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>{body_xml}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134" w:header="708" w:footer="708" w:gutter="0"/></w:sectPr></w:body>
+</w:document>"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as docx:
+        docx.writestr("[Content_Types].xml", content_types)
+        docx.writestr("_rels/.rels", rels)
+        docx.writestr("word/document.xml", document)
 
 
 def normalize_sql(sql: str) -> str:
@@ -273,11 +353,46 @@ def init_db():
       data_movimento TEXT,
       observacao TEXT
     );
+    CREATE TABLE IF NOT EXISTS notificacoes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      protocolo TEXT,
+      destinatario TEXT,
+      assunto TEXT,
+      corpo TEXT,
+      enviado INTEGER DEFAULT 0,
+      data_criacao TEXT,
+      data_envio TEXT,
+      erro TEXT
+    );
     """
     if USE_POSTGRES:
         return
     with db() as conn:
         conn.executescript(ddl)
+        protocol_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(protocolos)").fetchall()
+        }
+        for column, definition in {
+            "os_modelo_nome": "TEXT",
+            "os_modelo_path": "TEXT",
+            "os_preenchida_nome": "TEXT",
+            "os_preenchida_path": "TEXT",
+            "os_preenchida_em": "TEXT",
+            "os_preenchida_por": "TEXT",
+        }.items():
+            if column not in protocol_columns:
+                conn.execute(f"ALTER TABLE protocolos ADD COLUMN {column} {definition}")
+        user_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(usuarios)").fetchall()
+        }
+        for column, definition in {
+            "senha_temporaria": "INTEGER DEFAULT 0",
+            "trocar_senha_obrigatorio": "INTEGER DEFAULT 0",
+            "acesso_pendente": "INTEGER DEFAULT 0",
+            "data_solicitacao": "TEXT",
+        }.items():
+            if column not in user_columns:
+                conn.execute(f"ALTER TABLE usuarios ADD COLUMN {column} {definition}")
         exists = conn.execute("SELECT COUNT(*) AS total FROM usuarios").fetchone()["total"]
         if not exists:
             conn.execute(
@@ -296,6 +411,78 @@ def bool_value(value: Any) -> bool:
     return bool(value)
 
 
+def text_key(value: Any) -> str:
+    text = str(value or "").lower()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def get_owner(area: str, etapa: str) -> dict[str, Any]:
+    return fetch_one("SELECT * FROM owners_area WHERE area=? AND etapa=? AND ativo=1 LIMIT 1", (area, etapa)) or {
+        "nome": etapa,
+        "email": "",
+        "usuario": etapa,
+    }
+
+
+def notification_recipients(area: str, etapa: str = "", solicitante_email: str = "", include_all_area: bool = False) -> list[str]:
+    recipients = []
+    if solicitante_email:
+        recipients.append(solicitante_email)
+    if include_all_area:
+        recipients += [row.get("email") for row in fetch_all("SELECT email FROM owners_area WHERE area=? AND ativo=1", (area,))]
+    elif etapa:
+        recipients.append(get_owner(area, etapa).get("email"))
+    recipients += [row.get("email") for row in fetch_all("SELECT email FROM usuarios WHERE ativo=1 AND perfil IN ('Administrador','Moderador')")]
+    return sorted({str(email).strip() for email in recipients if str(email or "").strip()})
+
+
+def register_notification(protocolo: str, destinatario: str, assunto: str, corpo: str, enviado: bool = False, erro: str = ""):
+    execute(
+        "INSERT INTO notificacoes(protocolo,destinatario,assunto,corpo,enviado,data_criacao,data_envio,erro) VALUES(?,?,?,?,?,?,?,?)",
+        (protocolo, destinatario, assunto, corpo, 1 if enviado else 0, now_str(), now_str() if enviado else None, erro),
+    )
+
+
+def try_send_email(destinatario: str, assunto: str, corpo: str) -> tuple[bool, str]:
+    host = os.getenv("SMTP_HOST", "")
+    user = os.getenv("SMTP_USER", "")
+    password = os.getenv("SMTP_PASSWORD", "")
+    from_email = os.getenv("SMTP_FROM") or user
+    if not host or not from_email:
+        return False, "SMTP não configurado. Notificação ficou registrada no sistema."
+    msg = EmailMessage()
+    msg["From"] = from_email
+    msg["To"] = destinatario
+    msg["Subject"] = assunto
+    msg.set_content(corpo)
+    try:
+        with smtplib.SMTP(host, int(os.getenv("SMTP_PORT", "587"))) as server:
+            if os.getenv("SMTP_TLS", "1") != "0":
+                server.starttls()
+            if user and password:
+                server.login(user, password)
+            server.send_message(msg)
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+
+
+def notify_protocol(protocolo: str, area: str, etapa: str, status: str, solicitante_email: str = "", observacao: str = "", cancelled: bool = False):
+    if cancelled:
+        assunto = f"Protocolo {protocolo} cancelado"
+        corpo = f"O protocolo {protocolo} foi cancelado.\n\nÁrea: {area or '-'}\nObservação: {observacao or '-'}"
+        recipients = notification_recipients(area, solicitante_email=solicitante_email, include_all_area=True)
+    else:
+        assunto = f"Nova demanda para {status} - {protocolo}"
+        corpo = f"Existe uma nova demanda aguardando atuação.\n\nProtocolo: {protocolo}\nÁrea: {area or '-'}\nEtapa: {etapa or '-'}\nStatus: {status or '-'}\n\nObservação: {observacao or '-'}"
+        recipients = notification_recipients(area, etapa=etapa, solicitante_email=solicitante_email)
+    for destinatario in recipients:
+        ok, erro = try_send_email(destinatario, assunto, corpo)
+        register_notification(protocolo, destinatario, assunto, corpo, ok, erro)
+
+
 def allowed_levels(nivel: str) -> list[str]:
     return {
         "Básico": ["Básico"],
@@ -311,6 +498,60 @@ def next_step(status: str) -> tuple[str, str]:
         "Agendamento": ("Execução", "Executor"),
         "Execução": ("Finalizado", "Finalizado"),
     }.get(status, (status, ""))
+
+
+def generate_filled_os(protocolo: str, usuario: str, observacao: str = "") -> tuple[str, str] | tuple[None, None]:
+    row = fetch_one(
+        """SELECT p.*, e.entidade, e.cnpj, e.email_responsavel, e.municipio_entidade,
+                  e.territorio_identidade, e.endereco, e.telefone, c.curso
+           FROM protocolos p
+           LEFT JOIN entidades e ON e.id=p.entidade_id
+           LEFT JOIN cursos c ON c.id=p.curso_id
+           WHERE p.protocolo=? LIMIT 1""",
+        (protocolo,),
+    )
+    if not row:
+        return None, None
+    numero_os = f"OS-{datetime.now().strftime('%Y%m%d%H%M%S')}-{secrets.token_hex(2).upper()}"
+    data_br = datetime.now().strftime("%d/%m/%Y")
+    filename = f"{slug(protocolo)}_{numero_os}.docx"
+    destino = OS_UPLOAD_DIR / filename
+    body = [
+        docx_paragraph("ORDEM DE SERVIÇO", bold=True, size=32, align="center"),
+        docx_paragraph("Governança e Qualificação de Demandas - Bahia", bold=True, size=22, align="center"),
+        docx_section("1. IDENTIFICAÇÃO DA ORDEM DE SERVIÇO"),
+        docx_table([
+            [f"Número da OS: {numero_os}", f"Data de Abertura: {data_br}"],
+            ["Status: ( ) Aberta  ( ) Aprovada  ( X ) Agendamento  ( ) Em Execução  ( ) Concluída  ( ) Cancelada", ""],
+            [f"Origem da Demanda: {row.get('entidade') or '-'}", f"Número do Protocolo da Demanda: {protocolo}"],
+        ]),
+        docx_section("2. DADOS DA ORGANIZAÇÃO PRODUTIVA"),
+        docx_table([
+            [f"Nome da Organização: {row.get('entidade') or '-'}", f"CNPJ/CPF: {row.get('cnpj') or '-'}"],
+            [f"Município: {row.get('municipio_entidade') or '-'}", f"Território: {row.get('territorio_identidade') or '-'}"],
+            [f"Responsável Local: {row.get('email_responsavel') or '-'}", f"E-mail: {row.get('email_responsavel') or '-'}"],
+            [f"Endereço: {row.get('endereco') or '-'}", f"Telefone/WhatsApp: {row.get('telefone') or '-'}"],
+        ]),
+        docx_section("3. SOLICITANTE DA DEMANDA"),
+        docx_table([
+            [f"Nome do Coordenador/Demandante: {row.get('solicitante_nome') or usuario or '-'}", "Função: Analista Técnico"],
+            [f"Contato: {row.get('solicitante_email') or usuario or '-'}", f"Data da Solicitação: {data_br}"],
+        ]),
+        docx_section("4. DADOS DA DEMANDA"),
+        docx_table([
+            [f"Curso/Solução: {row.get('curso') or '-'}", f"Área: {row.get('area') or '-'}"],
+            [f"Observação da análise técnica: {observacao or '-'}", ""],
+        ]),
+    ]
+    write_simple_docx(destino, "".join(body))
+    data = now_str()
+    execute(
+        """UPDATE protocolos
+           SET os_preenchida_nome=?, os_preenchida_path=?, os_preenchida_em=?, os_preenchida_por=?
+           WHERE protocolo=?""",
+        (filename, str(destino), data, usuario, protocolo),
+    )
+    return str(destino), filename
 
 
 @app.get("/api/health")
@@ -332,6 +573,66 @@ def login():
     if not user or user.get("senha_hash") != hash_pw(password):
         return jsonify({"error": "Usuário ou senha inválidos."}), 401
     return jsonify({"user": public_user(user)})
+
+
+@app.post("/api/register")
+def register_user():
+    init_db()
+    data = request.get_json(force=True)
+    email = (data.get("email") or "").strip().lower()
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+        return jsonify({"error": "Informe um e-mail válido."}), 400
+    existing = fetch_one("SELECT * FROM usuarios WHERE LOWER(email)=? OR LOWER(usuario)=? LIMIT 1", (email, email))
+    temp = temporary_password()
+    data_solicitacao = now_str()
+    if existing:
+        if not existing.get("ativo"):
+            return jsonify({"error": "Este usuário está inativo. Procure um administrador."}), 400
+        execute(
+            """UPDATE usuarios
+               SET senha_hash=?, senha_temporaria=1, trocar_senha_obrigatorio=1,
+                   acesso_pendente=1, perfil='Pendente', data_solicitacao=?
+               WHERE id=?""",
+            (hash_pw(temp), data_solicitacao, existing["id"]),
+        )
+        user_id = existing["id"]
+    else:
+        user_id = execute(
+            """INSERT INTO usuarios(nome,usuario,email,senha_hash,perfil,senha_temporaria,
+                      trocar_senha_obrigatorio,acesso_pendente,data_solicitacao,ativo)
+               VALUES(?,?,?,?,?,?,?,?,?,1) RETURNING id""",
+            (email, email, email, hash_pw(temp), "Pendente", 1, 1, 1, data_solicitacao),
+        )
+    assunto = "Senha temporária - Sistema Bahia"
+    corpo = f"Olá.\n\nCriamos um acesso temporário para o Sistema Bahia.\n\nE-mail: {email}\nSenha temporária: {temp}\n\nAo entrar, defina uma nova senha."
+    ok, erro = try_send_email(email, assunto, corpo)
+    register_notification(f"ACESSO-{email}", email, assunto, corpo, ok, erro)
+    mod_subject = "Novo usuário aguardando qualificação - Sistema Bahia"
+    mod_body = f"Um novo usuário criou acesso e aguarda qualificação de atividade.\n\nE-mail: {email}\nID: {user_id}\nData: {data_solicitacao}"
+    for row in fetch_all("SELECT email FROM usuarios WHERE ativo=1 AND perfil IN ('Administrador','Moderador') AND email IS NOT NULL AND email<>''"):
+        destinatario = row.get("email")
+        ok, erro = try_send_email(destinatario, mod_subject, mod_body)
+        register_notification(f"ACESSO-{user_id}", destinatario, mod_subject, mod_body, ok, erro)
+    return jsonify({"message": "Usuário criado. Enviamos uma senha temporária para o e-mail informado."})
+
+
+@app.post("/api/change-password")
+def change_password():
+    init_db()
+    data = request.get_json(force=True)
+    user_id = data.get("user_id")
+    password = data.get("senha") or ""
+    if len(password) < 6:
+        return jsonify({"error": "A nova senha deve ter pelo menos 6 caracteres."}), 400
+    user = fetch_one("SELECT * FROM usuarios WHERE id=? AND ativo=1 LIMIT 1", (user_id,))
+    if not user:
+        return jsonify({"error": "Usuário não encontrado."}), 404
+    execute(
+        "UPDATE usuarios SET senha_hash=?, senha_temporaria=0, trocar_senha_obrigatorio=0 WHERE id=?",
+        (hash_pw(password), user_id),
+    )
+    updated = fetch_one("SELECT * FROM usuarios WHERE id=? LIMIT 1", (user_id,))
+    return jsonify({"message": "Senha definida com sucesso.", "user": public_user(updated)})
 
 
 @app.get("/api/dashboard")
@@ -521,6 +822,26 @@ def courses():
     return jsonify({"items": rows})
 
 
+@app.get("/api/courses/<int:course_id>/questions")
+def course_questions(course_id: int):
+    init_db()
+    questions = fetch_all("SELECT * FROM perguntas_curso WHERE curso_id=? AND ativo=1 ORDER BY ordem", (course_id,))
+    alternatives = fetch_all(
+        """SELECT a.*
+           FROM alternativas_curso a
+           JOIN perguntas_curso p ON p.id=a.pergunta_id
+           WHERE p.curso_id=? AND a.ativo=1
+           ORDER BY a.pergunta_id, a.ordem""",
+        (course_id,),
+    )
+    alternatives_by_question: dict[Any, list[dict[str, Any]]] = {}
+    for alternative in alternatives:
+        alternatives_by_question.setdefault(alternative.get("pergunta_id"), []).append(alternative)
+    for question in questions:
+        question["alternativas"] = alternatives_by_question.get(question.get("id"), [])
+    return jsonify({"items": questions})
+
+
 @app.get("/api/protocols")
 def protocols():
     init_db()
@@ -540,6 +861,8 @@ def create_protocol():
     data = request.get_json(force=True)
     protocolo = f"BA-{datetime.now().strftime('%Y%m%d%H%M%S')}"
     data_mov = now_str()
+    respostas = data.get("respostas", [])
+    pontuacao_curso = data.get("pontuacao_curso", sum(int(r.get("pontuacao") or 0) for r in respostas))
     execute(
         """INSERT INTO protocolos(protocolo,entidade_id,curso_id,area,pontuacao_curso,status,etapa_atual,responsavel_atual,
                   solicitante_nome,solicitante_email,data_abertura,data_atualizacao,observacao)
@@ -549,7 +872,7 @@ def create_protocol():
             data.get("entidade_id"),
             data.get("curso_id"),
             data.get("area"),
-            data.get("pontuacao_curso", 0),
+            pontuacao_curso,
             "Validação Administrativa",
             "Administrativo",
             "Administrativo",
@@ -564,6 +887,29 @@ def create_protocol():
         "INSERT INTO historico_fluxo(protocolo,status_anterior,status_novo,usuario,data_movimento,observacao) VALUES(?,?,?,?,?,?)",
         (protocolo, "", "Validação Administrativa", data.get("usuario", "admin"), data_mov, data.get("observacao", "")),
     )
+    notify_protocol(
+        protocolo,
+        data.get("area", ""),
+        "Administrativo",
+        "Validação Administrativa",
+        data.get("solicitante_email", ""),
+        data.get("observacao", ""),
+    )
+    with db() as conn:
+        for r in respostas:
+            conn.execute(
+                normalize_sql(
+                    "INSERT INTO respostas_curso(protocolo,pergunta_id,pergunta,resposta,pontuacao,data_resposta) VALUES(?,?,?,?,?,?)"
+                ),
+                (
+                    protocolo,
+                    r.get("pergunta_id"),
+                    r.get("pergunta"),
+                    r.get("resposta"),
+                    r.get("pontuacao", 0),
+                    data_mov,
+                ),
+            )
     return jsonify({"message": "Protocolo criado.", "protocolo": protocolo})
 
 
@@ -576,15 +922,77 @@ def advance_protocol(protocolo: str):
         return jsonify({"error": "Protocolo não encontrado."}), 404
     novo_status, nova_etapa = next_step(row.get("status"))
     data_mov = now_str()
-    execute(
-        "UPDATE protocolos SET status=?, etapa_atual=?, responsavel_atual=?, data_atualizacao=? WHERE protocolo=?",
-        (novo_status, nova_etapa, nova_etapa, data_mov, protocolo),
-    )
+    if text_key(row.get("status")) == "agendamento":
+        execute(
+            "UPDATE protocolos SET status=?, etapa_atual=?, responsavel_atual=?, data_atualizacao=?, data_agendada=? WHERE protocolo=?",
+            (novo_status, nova_etapa, nova_etapa, data_mov, data.get("data_agendada"), protocolo),
+        )
+    else:
+        execute(
+            "UPDATE protocolos SET status=?, etapa_atual=?, responsavel_atual=?, data_atualizacao=? WHERE protocolo=?",
+            (novo_status, nova_etapa, nova_etapa, data_mov, protocolo),
+        )
+    if text_key(row.get("status")) in {"analise tecnica", "analise t cnica"} and text_key(novo_status) == "agendamento":
+        generate_filled_os(protocolo, data.get("usuario", "admin"), data.get("observacao", ""))
     execute(
         "INSERT INTO historico_fluxo(protocolo,status_anterior,status_novo,usuario,data_movimento,observacao) VALUES(?,?,?,?,?,?)",
         (protocolo, row.get("status"), novo_status, data.get("usuario", "admin"), data_mov, data.get("observacao", "")),
     )
+    notify_protocol(
+        protocolo,
+        row.get("area", ""),
+        nova_etapa,
+        novo_status,
+        row.get("solicitante_email", ""),
+        data.get("observacao", ""),
+    )
     return jsonify({"message": "Fluxo atualizado.", "status": novo_status})
+
+
+@app.post("/api/protocols/<protocolo>/cancel")
+def cancel_protocol(protocolo: str):
+    init_db()
+    data = request.get_json(force=True)
+    row = fetch_one("SELECT * FROM protocolos WHERE protocolo=? LIMIT 1", (protocolo,))
+    if not row:
+        return jsonify({"error": "Protocolo não encontrado."}), 404
+    if text_key(row.get("status")) in {"cancelado", "reprovado", "finalizado"}:
+        return jsonify({"error": "Este protocolo já está encerrado."}), 400
+    data_mov = now_str()
+    execute(
+        "UPDATE protocolos SET status='Cancelado', etapa_atual='Cancelado', responsavel_atual='Cancelado', data_atualizacao=? WHERE protocolo=?",
+        (data_mov, protocolo),
+    )
+    execute(
+        "INSERT INTO historico_fluxo(protocolo,status_anterior,status_novo,usuario,data_movimento,observacao) VALUES(?,?,?,?,?,?)",
+        (protocolo, row.get("status"), "Cancelado", data.get("usuario", "admin"), data_mov, data.get("observacao", "")),
+    )
+    notify_protocol(
+        protocolo,
+        row.get("area", ""),
+        "Cancelado",
+        "Cancelado",
+        row.get("solicitante_email", ""),
+        data.get("observacao", ""),
+        cancelled=True,
+    )
+    return jsonify({"message": "Protocolo cancelado.", "status": "Cancelado"})
+
+
+@app.get("/api/protocols/<protocolo>/os")
+def download_os(protocolo: str):
+    init_db()
+    row = fetch_one("SELECT status, os_preenchida_nome, os_preenchida_path FROM protocolos WHERE protocolo=? LIMIT 1", (protocolo,))
+    if not row or not row.get("os_preenchida_path"):
+        if row and text_key(row.get("status")) in {"agendamento", "execucao", "finalizado"}:
+            generate_filled_os(protocolo, "admin", "")
+            row = fetch_one("SELECT status, os_preenchida_nome, os_preenchida_path FROM protocolos WHERE protocolo=? LIMIT 1", (protocolo,))
+        else:
+            return jsonify({"error": "OS ainda não foi gerada."}), 404
+    path = Path(row["os_preenchida_path"])
+    if not path.exists():
+        return jsonify({"error": "Arquivo da OS não encontrado."}), 404
+    return send_file(path, as_attachment=True, download_name=row.get("os_preenchida_nome") or path.name)
 
 
 @app.get("/api/forms/<protocolo>")
